@@ -1,8 +1,16 @@
-use solana_program::{program_error::ProgramError, msg};
-use crate::error::VestingError::InvalidInstruction;
-use std::convert::TryInto;
 use crate::error::VestingError;
-use solana_program::pubkey::Pubkey;
+
+use solana_program::{
+    instruction::{AccountMeta, Instruction},
+    msg,
+    program_error::ProgramError,
+    pubkey::Pubkey
+};
+
+use std::convert::TryInto;
+use std::mem::size_of;
+use crate::error::VestingError::InvalidInstruction;
+
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum VestingInstruction {
@@ -151,5 +159,200 @@ impl VestingInstruction {
             .and_then(|slice| slice.try_into().ok())
             .map(Pubkey::new)
             .ok_or(InvalidInstruction)
+    }
+
+    // the reverse of above - packs an instruction into a vector of bytes
+    pub fn pack(&self) -> Vec<u8> {
+        let mut buf = Vec::with_capacity(size_of::<Self>());
+        match self {
+            &Self::Init {
+                seeds,
+                number_of_schedules,
+            } => {
+                buf.push(0);
+                buf.extend_from_slice(&seeds);
+                buf.extend_from_slice(&number_of_schedules.to_le_bytes())
+            }
+            Self::Create {
+                seeds,
+                token_mint_addr,
+                token_dest_addr,
+                schedules,
+            } => {
+                buf.push(1);
+                buf.extend_from_slice(seeds);
+                buf.extend_from_slice(&token_mint_addr.to_bytes());
+                buf.extend_from_slice(&token_dest_addr.to_bytes());
+                for s in schedules.iter() {
+                    buf.extend_from_slice(&s.release_time.to_le_bytes());
+                    buf.extend_from_slice(&s.amount.to_le_bytes());
+                }
+            }
+            &Self::Unlock { seeds } => {
+                buf.push(2);
+                buf.extend_from_slice(&seeds);
+            }
+            &Self::ChangeDestination { seeds } => {
+                buf.push(3);
+                buf.extend_from_slice(&seeds);
+            }
+        };
+        buf
+    }
+}
+
+// ----------------------------------------------------------------------------- just copied the below, it's pretty straightforward
+
+// Creates a `Init` instruction
+pub fn init(
+    system_program_id: &Pubkey,
+    rent_program_id: &Pubkey,
+    vesting_program_id: &Pubkey,
+    payer_key: &Pubkey,
+    vesting_account: &Pubkey,
+    seeds: [u8; 32],
+    number_of_schedules: u32,
+) -> Result<Instruction, ProgramError> {
+    let data = VestingInstruction::Init {
+        seeds,
+        number_of_schedules,
+    }
+    .pack();
+    let accounts = vec![
+        AccountMeta::new_readonly(*system_program_id, false),
+        AccountMeta::new_readonly(*rent_program_id, false),
+        AccountMeta::new(*payer_key, true),
+        AccountMeta::new(*vesting_account, false),
+    ];
+    Ok(Instruction {
+        program_id: *vesting_program_id,
+        accounts,
+        data,
+    })
+}
+
+// Creates a `CreateSchedule` instruction
+pub fn create(
+    vesting_program_id: &Pubkey,
+    token_program_id: &Pubkey,
+    vesting_account_key: &Pubkey,
+    vesting_token_account_key: &Pubkey,
+    source_token_account_owner_key: &Pubkey,
+    source_token_account_key: &Pubkey,
+    destination_token_account_key: &Pubkey,
+    mint_address: &Pubkey,
+    schedules: Vec<Schedule>,
+    seeds: [u8; 32],
+) -> Result<Instruction, ProgramError> {
+    let data = VestingInstruction::Create {
+        token_mint_addr: *mint_address,
+        seeds,
+        token_dest_addr: *destination_token_account_key,
+        schedules,
+    }
+    .pack();
+    let accounts = vec![
+        AccountMeta::new_readonly(*token_program_id, false),
+        AccountMeta::new(*vesting_account_key, false),
+        AccountMeta::new(*vesting_token_account_key, false),
+        AccountMeta::new_readonly(*source_token_account_owner_key, true),
+        AccountMeta::new(*source_token_account_key, false),
+    ];
+    Ok(Instruction {
+        program_id: *vesting_program_id,
+        accounts,
+        data,
+    })
+}
+
+// Creates an `Unlock` instruction
+pub fn unlock(
+    vesting_program_id: &Pubkey,
+    token_program_id: &Pubkey,
+    clock_sysvar_id: &Pubkey,
+    vesting_account_key: &Pubkey,
+    vesting_token_account_key: &Pubkey,
+    destination_token_account_key: &Pubkey,
+    seeds: [u8; 32],
+) -> Result<Instruction, ProgramError> {
+    let data = VestingInstruction::Unlock { seeds }.pack();
+    let accounts = vec![
+        AccountMeta::new_readonly(*token_program_id, false),
+        AccountMeta::new_readonly(*clock_sysvar_id, false),
+        AccountMeta::new(*vesting_account_key, false),
+        AccountMeta::new(*vesting_token_account_key, false),
+        AccountMeta::new(*destination_token_account_key, false),
+    ];
+    Ok(Instruction {
+        program_id: *vesting_program_id,
+        accounts,
+        data,
+    })
+}
+
+pub fn change_destination(
+    vesting_program_id: &Pubkey,
+    vesting_account_key: &Pubkey,
+    current_destination_token_account_owner: &Pubkey,
+    current_destination_token_account: &Pubkey,
+    target_destination_token_account: &Pubkey,
+    seeds: [u8; 32],
+) -> Result<Instruction, ProgramError> {
+    let data = VestingInstruction::ChangeDestination { seeds }.pack();
+    let accounts = vec![
+        AccountMeta::new(*vesting_account_key, false),
+        AccountMeta::new_readonly(*current_destination_token_account, false),
+        AccountMeta::new_readonly(*current_destination_token_account_owner, true),
+        AccountMeta::new_readonly(*target_destination_token_account, false),
+    ];
+    Ok(Instruction {
+        program_id: *vesting_program_id,
+        accounts,
+        data,
+    })
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+
+    #[test]
+    fn test_instruction_packing() {
+        let token_mint_addr = Pubkey::new_unique();
+        let token_dest_addr = Pubkey::new_unique();
+
+        let original_create = VestingInstruction::Create {
+            seeds: [50u8; 32],
+            schedules: vec![Schedule {
+                amount: 42,
+                release_time: 250,
+            }],
+            token_mint_addr: token_mint_addr.clone(),
+            token_dest_addr,
+        };
+        let packed_create = original_create.pack();
+        let unpacked_create = VestingInstruction::unpack(&packed_create).unwrap();
+        assert_eq!(original_create, unpacked_create);
+
+        let original_unlock = VestingInstruction::Unlock { seeds: [50u8; 32] };
+        assert_eq!(
+            original_unlock,
+            VestingInstruction::unpack(&original_unlock.pack()).unwrap()
+        );
+
+        let original_init = VestingInstruction::Init {
+            number_of_schedules: 42,
+            seeds: [50u8; 32],
+        };
+        assert_eq!(
+            original_init,
+            VestingInstruction::unpack(&original_init.pack()).unwrap()
+        );
+
+        let original_change = VestingInstruction::ChangeDestination { seeds: [50u8; 32] };
+        assert_eq!(
+            original_change,
+            VestingInstruction::unpack(&original_change.pack()).unwrap()
+        );
     }
 }

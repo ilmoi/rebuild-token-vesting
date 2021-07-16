@@ -6,11 +6,10 @@ edition = "2018"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
-# todo look into
-#[workspace]
-#members = [
-#    "fuzz"
-#]
+[workspace]
+members = [
+    "fuzz"
+]
 
 [features]
 no-entrypoint = []

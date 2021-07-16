@@ -28,6 +28,7 @@ pub struct VestingScheduleHeader {
 // ----------------------------------------------------------------------------- 1)
 // just take the default implementation
 impl Sealed for VestingSchedule {}
+
 impl Sealed for VestingScheduleHeader {}
 
 // ----------------------------------------------------------------------------- 2)
@@ -146,5 +147,61 @@ pub fn pack_schedules_into_slice(schedules: Vec<VestingSchedule>, target: &mut [
     for s in schedules.iter() {
         s.pack_into_slice(&mut target[offset..]);
         offset += VestingSchedule::LEN;
+    }
+}
+
+// ----------------------------------------------------------------------------- tests
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_state_packing() {
+        // create the 3 structures
+        let header = VestingScheduleHeader {
+            destination_address: Pubkey::new_unique(), //nice function for testing
+            mint_address: Pubkey::new_unique(),
+            is_initialized: true,
+        };
+        let schedule_1 = VestingSchedule {
+            release_time: 1,
+            amount: 333,
+        };
+        let schedule_2 = VestingSchedule {
+            release_time: 99999,
+            amount: 111,
+        };
+
+        // pack them into a slice
+        const SIZE: usize = VestingScheduleHeader::LEN + 2 * VestingSchedule::LEN;
+        let mut state_array = [0_u8; SIZE];
+
+        header.pack_into_slice(&mut state_array[..VestingScheduleHeader::LEN]);
+        schedule_1.pack_into_slice(&mut state_array[VestingScheduleHeader::LEN..VestingScheduleHeader::LEN + VestingSchedule::LEN]);
+        schedule_2.pack_into_slice(&mut state_array[VestingScheduleHeader::LEN + VestingSchedule::LEN..]);
+        let packed = Vec::from(state_array);
+
+        // create an empty vector of same size
+        let mut expected = Vec::<u8>::with_capacity(SIZE);
+        // use extend_from_slice and to_le_bytes() to pack it
+        expected.extend_from_slice(&header.destination_address.to_bytes());
+        expected.extend_from_slice(&header.mint_address.to_bytes());
+        expected.extend_from_slice(&[header.is_initialized as u8]);
+        expected.extend_from_slice(&schedule_1.release_time.to_le_bytes());
+        expected.extend_from_slice(&schedule_1.amount.to_le_bytes());
+        expected.extend_from_slice(&schedule_2.release_time.to_le_bytes());
+        expected.extend_from_slice(&schedule_2.amount.to_le_bytes());
+
+        // test packing
+        assert_eq!(packed, expected);
+
+        // test unpacking
+        let unpacked_header = VestingScheduleHeader::unpack_from_slice(&packed[..VestingScheduleHeader::LEN]).unwrap();
+        assert_eq!(header, unpacked_header);
+        let unpacked_s1 = VestingSchedule::unpack_from_slice(&packed[VestingScheduleHeader::LEN..VestingScheduleHeader::LEN + VestingSchedule::LEN]).unwrap();
+        assert_eq!(schedule_1, unpacked_s1);
+        let unpacked_s2 = VestingSchedule::unpack_from_slice(&packed[VestingScheduleHeader::LEN + VestingSchedule::LEN..]).unwrap();
+        assert_eq!(schedule_2, unpacked_s2);
     }
 }
