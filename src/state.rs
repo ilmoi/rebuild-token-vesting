@@ -53,7 +53,7 @@ impl Pack for VestingSchedule {
 
         // fill in the byte fields from self
         *dst_release_time = self.release_time.to_le_bytes(); //todo weird - little endian not big...
-        *dst_amount = self.release_time.to_le_bytes();
+        *dst_amount = self.amount.to_le_bytes();
     }
 
     fn unpack_from_slice(src: &[u8]) -> Result<Self, ProgramError> {
@@ -123,5 +123,28 @@ impl Pack for VestingScheduleHeader {
             mint_address: Pubkey::new_from_array(*src_mint_address),
             is_initialized,
         })
+    }
+}
+
+// ----------------------------------------------------------------------------- other
+
+pub fn unpack_schedules(input: &[u8]) -> Result<Vec<VestingSchedule>, ProgramError> {
+    let number_of_schedules = input.len() / VestingSchedule::LEN;
+    let mut output: Vec<VestingSchedule> = Vec::with_capacity(number_of_schedules);
+    let mut offset = 0;
+    for _ in 0..number_of_schedules {
+        output.push(VestingSchedule::unpack_from_slice(
+            &input[offset..offset + VestingSchedule::LEN],
+        )?);
+        offset += VestingSchedule::LEN;
+    }
+    Ok(output)
+}
+
+pub fn pack_schedules_into_slice(schedules: Vec<VestingSchedule>, target: &mut [u8]) {
+    let mut offset = 0;
+    for s in schedules.iter() {
+        s.pack_into_slice(&mut target[offset..]);
+        offset += VestingSchedule::LEN;
     }
 }
