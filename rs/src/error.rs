@@ -1,20 +1,26 @@
-use solana_program::program_error::{ProgramError, PrintProgramError};
-use solana_program::decode_error::DecodeError;
 use num_traits::FromPrimitive;
-use solana_program::msg;
+use solana_program::{
+    decode_error::DecodeError,
+    msg,
+    program_error::{PrintProgramError, ProgramError},
+};
 
 /// Errors that may be returned by the Token vesting program.
 /// thiserror::Error covers std::error::Error trait
 #[derive(Clone, Debug, Eq, thiserror::Error, num_derive::FromPrimitive, PartialEq)]
 pub enum VestingError {
     #[error("Invalid Instruction")]
-    InvalidInstruction
+    InvalidInstruction,
+    #[error("Some other error")]
+    SomeOther,
 }
 
 // ----------------------------------------------------------------------------- VestingError -> ProgramError
 impl From<VestingError> for ProgramError {
-    //todo figure out what that number means
-    fn from(e: VestingError) -> Self {ProgramError::Custom(e as u32)}
+    // ok interesting, so you can convert enums into u32 numbers. First enum = 0, Second = 1, etc
+    fn from(e: VestingError) -> Self {
+        ProgramError::Custom(e as u32)
+    }
 }
 
 // ----------------------------------------------------------------------------- ProgramError -> VestingError
@@ -27,6 +33,7 @@ impl PrintProgramError for VestingError {
     {
         match self {
             VestingError::InvalidInstruction => msg!("Error: Invalid instruction!"),
+            VestingError::SomeOther => msg!("some other error occured!"),
         }
     }
 }
@@ -36,5 +43,3 @@ impl<T> DecodeError<T> for VestingError {
         "VestingError"
     }
 }
-
-//todo more generally look through ProgramError types

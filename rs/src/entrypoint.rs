@@ -1,7 +1,6 @@
-//todo is there no addon/crate that auto-optimizes imports?
-use solana_program::program_error::PrintProgramError;
 use solana_program::{
-    account_info::AccountInfo, entrypoint, entrypoint::ProgramResult, msg, pubkey::Pubkey,
+    account_info::AccountInfo, entrypoint, entrypoint::ProgramResult, msg,
+    program_error::PrintProgramError, pubkey::Pubkey,
 };
 
 use crate::{error::VestingError, processor::Processor};
@@ -16,7 +15,7 @@ pub fn process_instruction(
     msg!("Entrypoint!");
 
     if let Err(e) = Processor::process_instruction(program_id, accounts, instruction_data) {
-        // todo 1)what is e.print? 2)how do I benefit by casting?
+        // casting into VestingError means the error msg from vesting error will get printed
         // e.print(); //won't work without type annotation
         e.print::<VestingError>();
         return Err(e);
@@ -25,6 +24,5 @@ pub fn process_instruction(
     Ok(())
 }
 
-// todo interesting, can specify a specific addr to deploy to?
 // Deploy the program with the following id:
-// solana_program::declare_id!("VestingbGKPFXCWuBvfkegQfZyiNwAJb9Ss623VQ5DA");
+solana_program::declare_id!("SoLi39YzAM2zEXcecy77VGbxLB5yHryNckY9Jx7yBKM");

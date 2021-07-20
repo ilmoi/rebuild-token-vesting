@@ -1,17 +1,23 @@
-use solana_program::pubkey::Pubkey;
-use solana_program::account_info::{AccountInfo, next_account_info};
-use solana_program::{entrypoint::ProgramResult, msg};
-use crate::instruction::{VestingInstruction, Schedule, SCHEDULE_SIZE};
-use solana_program::rent::Rent;
-use solana_program::sysvar::Sysvar;
-use solana_program::program_error::ProgramError;
-use solana_program::system_instruction::create_account;
-use solana_program::program::{invoke_signed, invoke};
-use crate::state::{VestingSchedule, VestingScheduleHeader, unpack_schedules, pack_schedules_into_slice};
-use solana_program::program_pack::Pack;
-use spl_token::state::Account;
-use spl_token::instruction::transfer;
-use solana_program::clock::Clock;
+use solana_program::{
+    account_info::{next_account_info, AccountInfo},
+    clock::Clock,
+    entrypoint::ProgramResult,
+    msg,
+    program::{invoke, invoke_signed},
+    program_error::ProgramError,
+    program_pack::Pack,
+    pubkey::Pubkey,
+    rent::Rent,
+    system_instruction::create_account,
+    sysvar::Sysvar,
+};
+use spl_token::{instruction::transfer, state::Account};
+
+use crate::instruction::Seeds;
+use crate::{
+    instruction::{Schedule, VestingInstruction, SCHEDULE_SIZE},
+    state::{pack_schedules_into_slice, unpack_schedules, VestingSchedule, VestingScheduleHeader},
+};
 
 pub struct Processor {}
 
@@ -22,19 +28,37 @@ impl Processor {
         instruction_data: &[u8],
     ) -> ProgramResult {
         msg!("begin processing ix");
-
         // decode the instruction from bytes
         let instruction = VestingInstruction::unpack(instruction_data)?;
 
         // match the decoded instruction
         match instruction {
-            VestingInstruction::Init { seeds, number_of_schedules } => {
+            VestingInstruction::Empty { number } => {
+                msg!("it worked, number is {}", number);
+                return Ok(());
+            }
+            VestingInstruction::Init {
+                seeds,
+                number_of_schedules,
+            } => {
                 msg!("Instruction: Init");
                 Self::process_init(program_id, accounts, seeds, number_of_schedules)
             }
-            VestingInstruction::Create { seeds, token_mint_addr, token_dest_addr, schedules } => {
+            VestingInstruction::Create {
+                seeds,
+                token_mint_addr,
+                token_dest_addr,
+                schedules,
+            } => {
                 msg!("Instruction: Create");
-                Self::process_create(program_id, accounts, seeds, &token_mint_addr, &token_dest_addr, schedules)
+                Self::process_create(
+                    program_id,
+                    accounts,
+                    seeds,
+                    &token_mint_addr,
+                    &token_dest_addr,
+                    schedules,
+                )
             }
             VestingInstruction::Unlock { seeds } => {
                 msg!("Instruction: Unlock");
@@ -50,7 +74,7 @@ impl Processor {
     fn process_init(
         program_id: &Pubkey,
         accounts: &[AccountInfo],
-        seeds: [u8; 32],
+        seeds: Seeds,
         number_of_schedules: u32,
     ) -> ProgramResult {
         let accounts_iter = &mut accounts.iter();
@@ -61,7 +85,8 @@ impl Processor {
         let vesting_account = next_account_info(accounts_iter)?;
 
         // ----------------------------------------------------------------------------- size & rent
-        let state_size = (number_of_schedules as usize) * VestingSchedule::LEN + VestingScheduleHeader::LEN;
+        let state_size =
+            (number_of_schedules as usize) * VestingSchedule::LEN + VestingScheduleHeader::LEN;
         let rent = Rent::from_account_info(rent_sysvar_account)?;
         let rent_size = rent.minimum_balance(state_size);
 
@@ -84,14 +109,15 @@ impl Processor {
             &program_id,
         );
 
-        invoke_signed( //note how we're using _signed coz it's a PDA
-                       &init_vesting_account,
-                       &[
-                           system_program_account.clone(),
-                           payer.clone(),
-                           vesting_account.clone(),
-                       ],
-                       &[&[&seeds]], //signing with seeds
+        invoke_signed(
+            //note how we're using _signed coz it's a PDA
+            &init_vesting_account,
+            &[
+                system_program_account.clone(),
+                payer.clone(),
+                vesting_account.clone(),
+            ],
+            &[&[&seeds]], //signing with seeds
         )?;
         Ok(())
     }
@@ -99,7 +125,7 @@ impl Processor {
     pub fn process_create(
         program_id: &Pubkey,
         accounts: &[AccountInfo],
-        seeds: [u8; 32],
+        seeds: Seeds,
         token_mint_addr: &Pubkey,
         token_dest_addr: &Pubkey,
         schedules: Vec<Schedule>,
@@ -131,7 +157,8 @@ impl Processor {
         }
 
         // take the last byte of the header
-        let is_initialized = vesting_account.try_borrow_data()?[VestingScheduleHeader::LEN - 1] == 1;
+        let is_initialized =
+            vesting_account.try_borrow_data()?[VestingScheduleHeader::LEN - 1] == 1;
         if is_initialized {
             msg!("cannot overwrite an existing vesting contract");
             return Err(ProgramError::InvalidArgument);
@@ -170,7 +197,11 @@ impl Processor {
         //get a mutable reference to vesting_account's data
         let mut data = vesting_account.data.borrow_mut();
         if data.len() != VestingScheduleHeader::LEN + schedules.len() * VestingSchedule::LEN {
-            msg!("data len not right: l = {:?}, r = {:?}", data.len(), VestingScheduleHeader::LEN + schedules.len() * VestingSchedule::LEN);
+            msg!(
+                "data len not right: l = {:?}, r = {:?}",
+                data.len(),
+                VestingScheduleHeader::LEN + schedules.len() * VestingSchedule::LEN
+            );
             return Err(ProgramError::InvalidAccountData);
         }
 
@@ -190,12 +221,10 @@ impl Processor {
             //we're packing the schedule at a specific offset
             state_schedule.pack_into_slice(&mut data[offset..]);
 
-            //todo checked_add and math more generally on solana
-            //todo try to break
             let delta = total_amount.checked_add(s.amount);
             match delta {
                 Some(n) => total_amount = n, //not +=n, we're doing checked_add above
-                None => return Err(ProgramError::InvalidInstructionData)
+                None => return Err(ProgramError::InvalidInstructionData),
             }
             offset += SCHEDULE_SIZE;
         }
@@ -217,14 +246,15 @@ impl Processor {
             total_amount,
         )?;
 
-        invoke( //not invoke_signed because it's alice who's signing and not a PDA
-                &transfer_tokens_from_source_to_vesting_ix,
-                &[
-                    source_token_account.clone(),
-                    vesting_token_account.clone(),
-                    spl_token_account.clone(),
-                    source_token_account_owner.clone(),
-                ],
+        invoke(
+            //not invoke_signed because it's alice who's signing and not a PDA
+            &transfer_tokens_from_source_to_vesting_ix,
+            &[
+                source_token_account.clone(),
+                vesting_token_account.clone(),
+                spl_token_account.clone(),
+                source_token_account_owner.clone(),
+            ],
         )?;
 
         Ok(())
@@ -233,7 +263,7 @@ impl Processor {
     pub fn process_unlock(
         program_id: &Pubkey,
         _accounts: &[AccountInfo],
-        seeds: [u8; 32],
+        seeds: Seeds,
     ) -> ProgramResult {
         let accounts_iter = &mut _accounts.iter();
 
@@ -252,10 +282,9 @@ impl Processor {
         }
 
         //check provided spl_token program is the real one
-        //todo how does reference to &spl_token::id() work here?
         if spl_token_account.key != &spl_token::id() {
             msg!("The provided spl token program account is invalid");
-            return Err(ProgramError::InvalidArgument)
+            return Err(ProgramError::InvalidArgument);
         }
 
         // unpack header
@@ -285,7 +314,11 @@ impl Processor {
         let mut schedules = unpack_schedules(&packed_state.borrow()[VestingScheduleHeader::LEN..])?;
 
         for s in schedules.iter_mut() {
-            msg!("unix timestamp: {:?}, schedule's release time: {:?}",clock.unix_timestamp as u64, s.release_time);
+            msg!(
+                "unix timestamp: {:?}, schedule's release time: {:?}",
+                clock.unix_timestamp as u64,
+                s.release_time
+            );
             if clock.unix_timestamp as u64 >= s.release_time {
                 total_amount_to_transfer += s.amount;
                 s.amount = 0; //note we're also setting the amount to 0. we will update state below. this is so that once an amount has vested, it only transfers out of the vesting contract ONCE
@@ -296,7 +329,10 @@ impl Processor {
             return Err(ProgramError::InvalidArgument);
         }
 
-        msg!("vesting contract balance is {:?}", vesting_token_account_data.amount);
+        msg!(
+            "vesting contract balance is {:?}",
+            vesting_token_account_data.amount
+        );
         msg!("total amount to transfer is {:?}", total_amount_to_transfer);
 
         // ----------------------------------------------------------------------------- transfer
@@ -309,7 +345,8 @@ impl Processor {
             total_amount_to_transfer,
         )?;
 
-        invoke_signed( //sign with a pda coz token_vesting_account is a pda
+        invoke_signed(
+            //sign with a pda coz token_vesting_account is a pda
             &transfer_tokens_from_vesting_account,
             &[
                 spl_token_account.clone(),
@@ -333,7 +370,7 @@ impl Processor {
     pub fn process_change_destination(
         program_id: &Pubkey,
         accounts: &[AccountInfo],
-        seeds: [u8; 32],
+        seeds: Seeds,
     ) -> ProgramResult {
         let accounts_iter = &mut accounts.iter();
 
@@ -345,7 +382,7 @@ impl Processor {
         // ----------------------------------------------------------------------------- checks
         if vesting_account.data.borrow().len() < VestingScheduleHeader::LEN {
             msg!("vesting account's data should  never be shorter than the header");
-            return Err(ProgramError::InvalidAccountData)
+            return Err(ProgramError::InvalidAccountData);
         }
 
         // check vesting account matches
@@ -389,4 +426,3 @@ impl Processor {
         Ok(())
     }
 }
-

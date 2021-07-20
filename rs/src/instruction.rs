@@ -1,17 +1,21 @@
-use crate::error::VestingError;
+use borsh::{BorshDeserialize, BorshSerialize};
+use serde::{Deserialize, Serialize};
+use std::{convert::TryInto, mem::size_of};
 
 use solana_program::{
     instruction::{AccountMeta, Instruction},
     msg,
     program_error::ProgramError,
-    pubkey::Pubkey
+    pubkey::Pubkey,
 };
 
-use std::convert::TryInto;
-use std::mem::size_of;
-use crate::error::VestingError::InvalidInstruction;
+use crate::error::{VestingError, VestingError::InvalidInstruction};
+use solana_program::log::sol_log_compute_units;
 
+pub type Seeds = [u8; 32];
 
+// #[derive(Clone, Debug, PartialEq, BorshSerialize, BorshDeserialize)]
+// #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[derive(Clone, Debug, PartialEq)]
 pub enum VestingInstruction {
     /// Initializes an empty program account for the token_vesting program
@@ -25,7 +29,7 @@ pub enum VestingInstruction {
     ///   1. `[]` The vesting account
     Init {
         // The seed used to derive the vesting accounts address
-        seeds: [u8; 32],
+        seeds: Seeds,
         // The number of release schedules for this contract to hold
         number_of_schedules: u32,
     },
@@ -40,7 +44,7 @@ pub enum VestingInstruction {
     ///   3. `[signer]` The source spl-token account owner
     ///   4. `[writable]` The source spl-token account
     Create {
-        seeds: [u8; 32],
+        seeds: Seeds,
         token_mint_addr: Pubkey,
         token_dest_addr: Pubkey,
         schedules: Vec<Schedule>,
@@ -54,7 +58,9 @@ pub enum VestingInstruction {
     ///   1. `[writable]` The vesting account
     ///   2. `[writable]` The vesting spl-token account
     ///   3. `[writable]` The destination spl-token account
-    Unlock { seeds: [u8; 32] },
+    Unlock {
+        seeds: Seeds,
+    },
 
     /// Change the destination account of a given simple vesting contract (SVC)
     /// - can only be invoked by the present destination address of the contract.
@@ -66,22 +72,34 @@ pub enum VestingInstruction {
     ///   1. `[]` The current destination token account
     ///   2. `[signer]` The destination spl-token account owner
     ///   3. `[]` The new destination spl-token account
-    ChangeDestination { seeds: [u8; 32] },
+    ChangeDestination {
+        seeds: Seeds,
+    },
+    Empty {
+        number: u32,
+    },
 }
 
 pub const SCHEDULE_SIZE: usize = 16;
 
+// #[derive(Clone, Debug, PartialEq, BorshSerialize, BorshDeserialize)]
+// #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[derive(Clone, Debug, PartialEq)]
 pub struct Schedule {
     pub release_time: u64, //in SECONDS, not milliseconds
     pub amount: u64,
 }
 
-
 impl VestingInstruction {
     pub fn unpack(input: &[u8]) -> Result<Self, ProgramError> {
-        let (&tag, rest) = input.split_first().ok_or(InvalidInstruction)?;
+        msg!("input is {:?}", input);
 
+        // Below are listed 3 different ways of deserializing the incoming byte array.
+        // Uncomment the appropriate one.
+        // you might have to derive Serialize, Deserialize / BorshSerialize, BorshDeserialize on a few structs/enums to make the code compile
+
+        // ----------------------------------------------------------------------------- 1 manual
+        let (&tag, rest) = input.split_first().ok_or(InvalidInstruction)?;
         let result = match tag {
             0 => {
                 let seeds = Self::unpack_seeds(rest, 0).unwrap();
@@ -102,9 +120,12 @@ impl VestingInstruction {
 
                 for _ in 0..number_of_schedules {
                     let release_time = Self::unpack_u64(rest, offset)?;
-                    let amount = Self::unpack_u64(rest, offset+8)?;
+                    let amount = Self::unpack_u64(rest, offset + 8)?;
                     offset += SCHEDULE_SIZE;
-                    schedules.push(Schedule {release_time, amount})
+                    schedules.push(Schedule {
+                        release_time,
+                        amount,
+                    })
                 }
 
                 Self::Create {
@@ -117,9 +138,13 @@ impl VestingInstruction {
             2 | 3 => {
                 let seeds = Self::unpack_seeds(rest, 0).unwrap();
                 match tag {
-                    2 => Self::Unlock {seeds},
-                    _ => Self::ChangeDestination {seeds},
+                    2 => Self::Unlock { seeds },
+                    _ => Self::ChangeDestination { seeds },
                 }
+            }
+            4 => {
+                let number = Self::unpack_u32(rest, 0).unwrap();
+                Self::Empty { number }
             }
             _ => {
                 msg!("unsupported instruction! passed tag: {:?}", tag);
@@ -127,35 +152,41 @@ impl VestingInstruction {
             }
         };
 
+        // ----------------------------------------------------------------------------- 2 bincode
+        // let result: Self = bincode::deserialize(input).unwrap();
+
+        // ----------------------------------------------------------------------------- 3 borsh
+        // let result: Self = Self::try_from_slice(input).unwrap();
+
+        // -----------------------------------------------------------------------------
+        msg!("result is {:?}", result);
+        sol_log_compute_units();
         Ok(result)
     }
 
     /// assumes 32 bytes long
-    fn unpack_seeds(rest: &[u8], start: usize) -> Option<[u8; 32]> {
-        rest
-            .get(start..start+32) //32 bytes of seeds
+    fn unpack_seeds(rest: &[u8], start: usize) -> Option<Seeds> {
+        rest.get(start..start + 32) //32 bytes of seeds
             .and_then(|slice| slice.try_into().ok())
     }
 
     fn unpack_u32(rest: &[u8], start: usize) -> Result<u32, VestingError> {
-        rest
-            .get(start..start+4) //4 bytes int
+        rest.get(start..start + 4) //4 bytes int
             .and_then(|slice| slice.try_into().ok())
-            .map(u32::from_le_bytes) //todo surprised they're using LE here not BE?
+            .map(u32::from_le_bytes)
             .ok_or(InvalidInstruction)
     }
 
     fn unpack_u64(rest: &[u8], start: usize) -> Result<u64, VestingError> {
-        rest
-            .get(start..start+8) //8 bytes int
+        // return Err(VestingError::SomeOther);
+        rest.get(start..start + 8) //8 bytes int
             .and_then(|slice| slice.try_into().ok())
-            .map(u64::from_le_bytes) //todo surprised they're using LE here not BE?
+            .map(u64::from_le_bytes)
             .ok_or(InvalidInstruction)
     }
 
-    fn unpack_addr(rest: &[u8], start:usize) -> Result<Pubkey, VestingError> {
-        rest
-            .get(start..start+32)
+    fn unpack_addr(rest: &[u8], start: usize) -> Result<Pubkey, VestingError> {
+        rest.get(start..start + 32)
             .and_then(|slice| slice.try_into().ok())
             .map(Pubkey::new)
             .ok_or(InvalidInstruction)
@@ -165,6 +196,7 @@ impl VestingInstruction {
     pub fn pack(&self) -> Vec<u8> {
         let mut buf = Vec::with_capacity(size_of::<Self>());
         match self {
+            Self::Empty { number } => return vec![0],
             &Self::Init {
                 seeds,
                 number_of_schedules,
@@ -201,6 +233,8 @@ impl VestingInstruction {
     }
 }
 
+// impl BorshDeserialize for StakeState {
+
 // ----------------------------------------------------------------------------- just copied the below, it's pretty straightforward
 
 // Creates a `Init` instruction
@@ -210,7 +244,7 @@ pub fn init(
     vesting_program_id: &Pubkey,
     payer_key: &Pubkey,
     vesting_account: &Pubkey,
-    seeds: [u8; 32],
+    seeds: Seeds,
     number_of_schedules: u32,
 ) -> Result<Instruction, ProgramError> {
     let data = VestingInstruction::Init {
@@ -242,7 +276,7 @@ pub fn create(
     destination_token_account_key: &Pubkey,
     mint_address: &Pubkey,
     schedules: Vec<Schedule>,
-    seeds: [u8; 32],
+    seeds: Seeds,
 ) -> Result<Instruction, ProgramError> {
     let data = VestingInstruction::Create {
         token_mint_addr: *mint_address,
@@ -273,7 +307,7 @@ pub fn unlock(
     vesting_account_key: &Pubkey,
     vesting_token_account_key: &Pubkey,
     destination_token_account_key: &Pubkey,
-    seeds: [u8; 32],
+    seeds: Seeds,
 ) -> Result<Instruction, ProgramError> {
     let data = VestingInstruction::Unlock { seeds }.pack();
     let accounts = vec![
@@ -296,7 +330,7 @@ pub fn change_destination(
     current_destination_token_account_owner: &Pubkey,
     current_destination_token_account: &Pubkey,
     target_destination_token_account: &Pubkey,
-    seeds: [u8; 32],
+    seeds: Seeds,
 ) -> Result<Instruction, ProgramError> {
     let data = VestingInstruction::ChangeDestination { seeds }.pack();
     let accounts = vec![

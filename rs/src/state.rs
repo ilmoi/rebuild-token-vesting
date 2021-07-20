@@ -1,9 +1,10 @@
-use solana_program::pubkey::Pubkey;
-use solana_program::program_pack::{Sealed, IsInitialized, Pack};
-use solana_program::msg;
-
 use arrayref::{array_mut_ref, array_ref, array_refs, mut_array_refs};
-use solana_program::program_error::ProgramError;
+use solana_program::{
+    msg,
+    program_error::ProgramError,
+    program_pack::{IsInitialized, Pack, Sealed},
+    pubkey::Pubkey,
+};
 
 #[derive(Debug, PartialEq)]
 pub struct VestingSchedule {
@@ -23,7 +24,6 @@ pub struct VestingScheduleHeader {
 // 1)is_initialized = check if state has been initialized
 // 2)pack = de/serialize state
 // 3)sealed = solana's version of size
-
 
 // ----------------------------------------------------------------------------- 1)
 // just take the default implementation
@@ -47,13 +47,10 @@ impl Pack for VestingSchedule {
         let dst = array_mut_ref!(dst, 0, VestingSchedule::LEN); //gen mutable ref to a subset of a slice
 
         // prepare the byte slices we'll be filling in
-        let (
-            dst_release_time,
-            dst_amount,
-        ) = mut_array_refs![dst, 8, 8]; //get multiple mutable refs to subsets of a slice
+        let (dst_release_time, dst_amount) = mut_array_refs![dst, 8, 8]; //get multiple mutable refs to subsets of a slice
 
         // fill in the byte fields from self
-        *dst_release_time = self.release_time.to_le_bytes(); //todo weird - little endian not big...
+        *dst_release_time = self.release_time.to_le_bytes();
         *dst_amount = self.amount.to_le_bytes();
     }
 
@@ -66,10 +63,7 @@ impl Pack for VestingSchedule {
         let src = array_ref!(src, 0, VestingSchedule::LEN); //gen an array ref to a subset of a slice
 
         // get refs to each slice we're interested in
-        let (
-            src_release_time,
-            src_amount,
-        ) = array_refs![src, 8, 8]; //get multiple refs to multiple subsets of a slice
+        let (src_release_time, src_amount) = array_refs![src, 8, 8]; //get multiple refs to multiple subsets of a slice
 
         Ok(Self {
             release_time: u64::from_le_bytes(*src_release_time),
@@ -86,11 +80,8 @@ impl Pack for VestingScheduleHeader {
         let dst = array_mut_ref!(dst, 0, VestingScheduleHeader::LEN); //gen mutable ref to a subset of a slice
 
         // prepare the byte slices we'll be filling in
-        let (
-            dst_destination_address,
-            dst_mint_address,
-            dst_is_initialized,
-        ) = mut_array_refs![dst, 32, 32, 1]; //get multiple mutable refs to subsets of a slice
+        let (dst_destination_address, dst_mint_address, dst_is_initialized) =
+            mut_array_refs![dst, 32, 32, 1]; //get multiple mutable refs to subsets of a slice
 
         // fill in the byte fields from self
         dst_destination_address.copy_from_slice(self.destination_address.as_ref());
@@ -107,11 +98,8 @@ impl Pack for VestingScheduleHeader {
         let src = array_ref!(src, 0, VestingScheduleHeader::LEN); //gen an array ref to a subset of a slice
 
         // get refs to each slice we're interested in
-        let (
-            src_destination_address,
-            src_mint_address,
-            src_is_initialized,
-        ) = array_refs![src, 32, 32, 1]; //get multiple refs to multiple subsets of a slice
+        let (src_destination_address, src_mint_address, src_is_initialized) =
+            array_refs![src, 32, 32, 1]; //get multiple refs to multiple subsets of a slice
 
         let is_initialized = match src_is_initialized {
             [0] => false,
@@ -178,8 +166,12 @@ mod tests {
         let mut state_array = [0_u8; SIZE];
 
         header.pack_into_slice(&mut state_array[..VestingScheduleHeader::LEN]);
-        schedule_1.pack_into_slice(&mut state_array[VestingScheduleHeader::LEN..VestingScheduleHeader::LEN + VestingSchedule::LEN]);
-        schedule_2.pack_into_slice(&mut state_array[VestingScheduleHeader::LEN + VestingSchedule::LEN..]);
+        schedule_1.pack_into_slice(
+            &mut state_array
+                [VestingScheduleHeader::LEN..VestingScheduleHeader::LEN + VestingSchedule::LEN],
+        );
+        schedule_2
+            .pack_into_slice(&mut state_array[VestingScheduleHeader::LEN + VestingSchedule::LEN..]);
         let packed = Vec::from(state_array);
 
         // create an empty vector of same size
@@ -197,11 +189,19 @@ mod tests {
         assert_eq!(packed, expected);
 
         // test unpacking
-        let unpacked_header = VestingScheduleHeader::unpack_from_slice(&packed[..VestingScheduleHeader::LEN]).unwrap();
+        let unpacked_header =
+            VestingScheduleHeader::unpack_from_slice(&packed[..VestingScheduleHeader::LEN])
+                .unwrap();
         assert_eq!(header, unpacked_header);
-        let unpacked_s1 = VestingSchedule::unpack_from_slice(&packed[VestingScheduleHeader::LEN..VestingScheduleHeader::LEN + VestingSchedule::LEN]).unwrap();
+        let unpacked_s1 = VestingSchedule::unpack_from_slice(
+            &packed[VestingScheduleHeader::LEN..VestingScheduleHeader::LEN + VestingSchedule::LEN],
+        )
+        .unwrap();
         assert_eq!(schedule_1, unpacked_s1);
-        let unpacked_s2 = VestingSchedule::unpack_from_slice(&packed[VestingScheduleHeader::LEN + VestingSchedule::LEN..]).unwrap();
+        let unpacked_s2 = VestingSchedule::unpack_from_slice(
+            &packed[VestingScheduleHeader::LEN + VestingSchedule::LEN..],
+        )
+        .unwrap();
         assert_eq!(schedule_2, unpacked_s2);
     }
 }

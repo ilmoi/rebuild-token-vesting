@@ -1,0 +1,33 @@
+
+[package]
+name = "rebuild-rs-fuzz"
+version = "0.0.0"
+authors = ["Automatically generated"]
+publish = false
+edition = "2018"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+arbitrary = { version = "0.4", features = ["derive"] }
+solana-program = "1.5.6"
+solana-sdk = "1.5.6"
+solana-program-test = "1.5.6"
+spl-token = { version = "3.0.1", features = ["no-entrypoint"] }
+spl-associated-token-account = { version = "1.0.2", features = ["no-entrypoint"] }
+tokio = { version = "1.0", features = ["macros"]}
+
+[dependencies.rebuild-rs]
+path = ".."
+
+# Prevent this from interfering with workspaces
+[workspace]
+members = ["."]
+
+[[bin]]
+name = "fuzz_target_1"
+path = "fuzz_targets/fuzz_target_1.rs"
+test = false
+doc = false

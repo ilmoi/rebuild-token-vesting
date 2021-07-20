@@ -1,0 +1,9 @@
+{
+  "dependencies": {
+    "@bonfida/token-vesting": "^0.0.8",
+    "@solana/spl-token": "^0.1.6",
+    "@solana/web3.js": "^1.21.0",
+    "bn.js": "^5.2.0",
+    "borsh": "^0.4.0"
+  }
+}
