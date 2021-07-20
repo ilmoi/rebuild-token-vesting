@@ -47,7 +47,7 @@ const schedules = [
   new Schedule(now_u64, amount_u64),
 ]
 
-const seed = Buffer.from("11111111yayayayayyayayayayyayayayayyayayayayyayayayay"); //had to be long enough, at least 32 bytes
+const seed = Buffer.from("31111111yayayayayyayayayayyayayayayyayayayayyayayayay"); //had to be long enough, at least 32 bytes
 
 async function createContract() {
   const create_ix = await create(
@@ -217,7 +217,7 @@ async function callEmpty() {
 
 // ----------------------------------------------------------------------------- run
 
-// createContract()
+createContract()
 // changeDest()
 // unlockContract()
-callEmpty()
+// callEmpty()

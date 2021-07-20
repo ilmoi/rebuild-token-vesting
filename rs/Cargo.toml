@@ -32,6 +32,7 @@ serde = { version="1.0.126", features=["derive"] }
 
 [dev-dependencies]
 solana-sdk = "1.5.6"
+solana-client = "1.7.6"
 solana-program-test = "1.5.6"
 tokio = { version = "1.0", features = ["macros"]}
 

@@ -25,4 +25,4 @@ pub fn process_instruction(
 }
 
 // Deploy the program with the following id:
-solana_program::declare_id!("SoLi39YzAM2zEXcecy77VGbxLB5yHryNckY9Jx7yBKM");
+// solana_program::declare_id!("SoLi39YzAM2zEXcecy77VGbxLB5yHryNckY9Jx7yBKM");

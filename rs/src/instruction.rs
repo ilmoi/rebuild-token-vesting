@@ -1,5 +1,5 @@
-use borsh::{BorshDeserialize, BorshSerialize};
-use serde::{Deserialize, Serialize};
+// use borsh::{BorshDeserialize, BorshSerialize};
+// use serde::{Deserialize, Serialize};
 use std::{convert::TryInto, mem::size_of};
 
 use solana_program::{
@@ -232,8 +232,6 @@ impl VestingInstruction {
         buf
     }
 }
-
-// impl BorshDeserialize for StakeState {
 
 // ----------------------------------------------------------------------------- just copied the below, it's pretty straightforward
 

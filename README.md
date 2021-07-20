@@ -25,6 +25,6 @@ Thus manual is least expensive, but borsh is close.
 
 In terms of quantity/readability of code - I thought borsh would win since
 deserializing in rust is 1 line vs writing out everything yourself (see
-`rs/src/instruction.rs`). But js ended up being a shitshow - see https://github.com/near/borsh-js/issues/21
+`rs/src/instruction.rs`). But js ended up being a shitshow - see `js/play.js` and https://github.com/near/borsh-js/issues/21
 
 For now manual de/serialization seems optimal, unless borsh-js gets better enum handling.
