@@ -4,13 +4,13 @@ use std::{convert::TryInto, mem::size_of};
 
 use solana_program::{
     instruction::{AccountMeta, Instruction},
+    log::sol_log_compute_units,
     msg,
     program_error::ProgramError,
     pubkey::Pubkey,
 };
 
 use crate::error::{VestingError, VestingError::InvalidInstruction};
-use solana_program::log::sol_log_compute_units;
 
 pub type Seeds = [u8; 32];
 

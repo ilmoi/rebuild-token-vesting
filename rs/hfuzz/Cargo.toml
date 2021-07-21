@@ -1,0 +1,29 @@
+[package]
+name = "fuzz"
+version = "0.1.0"
+edition = "2018"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+# fuzzing
+honggfuzz = { version = "0.5" }
+arbitrary = { version = "1", features = ["derive"] }
+
+# solana
+solana-program = "1.5.6"
+solana-sdk = "1.5.6"
+solana-program-test = "1.5.6"
+spl-token = { version = "3.0.1", features = ["no-entrypoint"] }
+spl-associated-token-account = { version = "1.0.2", features = ["no-entrypoint"] }
+
+# our program
+rebuild-rs =  { version = "0.1.0", path="..", features=["fuzz", "no-entrypoint"] }
+
+tokio = { version = "1.0", features = ["macros"]}
+
+[[bin]]
+name = "vesting_fuzz"
+path = "src/vesting_fuzz.rs"
+test = false
+doc = false

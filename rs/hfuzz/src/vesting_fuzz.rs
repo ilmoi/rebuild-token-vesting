@@ -1,8 +1,6 @@
-// this prevents the test to be run outside of cargo test-bpf
-#![cfg(feature = "test-bpf")]
-
 use std::{borrow::Borrow, convert::TryInto, str::FromStr};
 
+use honggfuzz::fuzz;
 use rebuild_rs::{
     instruction::{create, unlock, Schedule, VestingInstruction},
     processor::Processor,
@@ -24,8 +22,31 @@ use solana_sdk::{
 };
 use spl_token::solana_program::program_pack::Pack;
 
+// ----------------------------------------------------------------------------- structs / consts
+
 const SEED: &str = "11111111yayayayayyayayayayyayayayayyayayayayyayayayay";
-// const TOKEN_MINT_ADDR: &str = "5e48G9KL813hkT9LRCHs6uGFdrhAihP8Jbk1QfScE78R";
+
+pub struct TokenVestingEnv {}
+
+#[derive(Debug, arbitrary::Arbitrary, Clone)]
+pub struct FuzzInstruction {
+    pub amount: u64,
+}
+
+// ----------------------------------------------------------------------------- fuzz main
+
+fn main() {
+    loop {
+        fuzz!(|fuzz_instruction: FuzzInstruction| {
+            // println!("amount is: {}", fuzz_instruction.amount);
+            // assert!(fuzz_instruction.amount > 10000);
+            let rt = tokio::runtime::Runtime::new().unwrap();
+            rt.block_on(async { test_init_create_unlock_flow().await })
+        });
+    }
+}
+
+// ----------------------------------------------------------------------------- helpers
 
 async fn setup_test_env() -> (BanksClient, Keypair, Hash, Pubkey) {
     let program_id = Pubkey::from_str("SoLi39YzAM2zEXcecy77VGbxLB5yHryNckY9Jx7yBKM").unwrap();
@@ -40,7 +61,7 @@ async fn setup_test_env() -> (BanksClient, Keypair, Hash, Pubkey) {
     (banks_client, payer, recent_blockhash, program_id)
 }
 
-#[tokio::test]
+// #[tokio::test]
 async fn test_empty_ix() {
     let (mut banks_client, payer, recent_blockhash, program_id) = setup_test_env().await;
 
@@ -88,7 +109,7 @@ async fn test_empty_ix() {
     banks_client.process_transaction(tx).await.unwrap();
 }
 
-#[tokio::test]
+// #[tokio::test]
 async fn test_init_create_unlock_flow() {
     let (mut banks_client, payer, recent_blockhash, program_id) = setup_test_env().await;
 
@@ -344,4 +365,6 @@ async fn test_init_create_unlock_flow() {
     let source_token_acc_state =
         spl_token::state::Account::unpack_from_slice(&source_acc.data).unwrap();
     assert_eq!(source_token_acc_state.amount, 1000 - 111);
+
+    println!("it workerd");
 }

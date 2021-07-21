@@ -13,9 +13,8 @@ use solana_program::{
 };
 use spl_token::{instruction::transfer, state::Account};
 
-use crate::instruction::Seeds;
 use crate::{
-    instruction::{Schedule, VestingInstruction, SCHEDULE_SIZE},
+    instruction::{Schedule, Seeds, VestingInstruction, SCHEDULE_SIZE},
     state::{pack_schedules_into_slice, unpack_schedules, VestingSchedule, VestingScheduleHeader},
 };
 
