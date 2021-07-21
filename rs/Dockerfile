@@ -10,12 +10,5 @@ RUN apt-get install -y build-essential binutils-dev libunwind-dev libblocksrunti
 COPY . .
 
 # don't include [] or the command will be run directly rather than inside a shell - https://goinbigdata.com/docker-run-vs-cmd-vs-entrypoint/
-#CMD cd fuzz; cargo hfuzz run vesting_fuzz
+CMD cd fuzz; cargo hfuzz run vesting_fuzz
 
-
-
-
-# 3) run the below command
-# BPF_OUT_DIR="./bpf_out" HFUZZ_RUN_ARGS="-t 10 -n 32 -N 1000000" cargo hfuzz run vesting_fuzz
-
-# 4) ctrl-c when done and keep docker open

@@ -1,370 +1,488 @@
-use std::{borrow::Borrow, convert::TryInto, str::FromStr};
+use std::{borrow::Borrow, collections::HashMap, convert::TryInto, str::FromStr};
 
 use honggfuzz::fuzz;
 use rebuild_rs::{
-    instruction::{create, unlock, Schedule, VestingInstruction},
+    instruction::{create, init, unlock, Schedule, VestingInstruction},
     processor::Processor,
     state::VestingSchedule,
 };
 use solana_program::{
-    instruction::{AccountMeta, Instruction},
+    instruction::{AccountMeta, Instruction, InstructionError},
     pubkey::Pubkey,
     rent::Rent,
+    system_instruction,
     system_instruction::create_account,
     system_program,
-    sysvar::{self},
+    sysvar::{self, SysvarId},
 };
 use solana_program_test::*;
 use solana_sdk::{
+    account::Account,
     hash::Hash,
     signature::{Keypair, Signer},
-    transaction::Transaction,
+    transaction::{Transaction, TransactionError},
+    transport::TransportError,
 };
-use spl_token::solana_program::program_pack::Pack;
+use spl_associated_token_account::{create_associated_token_account, get_associated_token_address};
+use spl_token::{
+    instruction::{initialize_mint, mint_to},
+    solana_program::program_pack::Pack,
+};
 
 // ----------------------------------------------------------------------------- structs / consts
 
-const SEED: &str = "11111111yayayayayyayayayayyayayayayyayayayayyayayayay";
-
-pub struct TokenVestingEnv {}
+pub struct TokenVestingEnv {
+    system_program_id: Pubkey,
+    token_program_id: Pubkey,
+    clock_program_id: Pubkey,
+    rent_program_id: Pubkey,
+    vesting_program_id: Pubkey,
+    mint_authority_keypair: Keypair,
+}
 
 #[derive(Debug, arbitrary::Arbitrary, Clone)]
 pub struct FuzzInstruction {
-    pub amount: u64,
+    instruction: VestingInstruction, // these seeds in this ix won't be correct but it doesn't matter, we're only using it for matching, to decide with ix to perform
+    amount: u64,
+    seeds: [u8; 32],
+    vesting_account_key: AccountId,
+    vesting_token_account_key: AccountId,
+    source_token_account_owner_key: AccountId,
+    source_token_account_key: AccountId,
+    source_token_amount: u64,
+    destination_token_owner_key: AccountId,
+    destination_token_key: AccountId,
+    new_destination_token_key: AccountId,
+    mint_key: AccountId,
+    schedules: Vec<Schedule>,
+    payer_key: AccountId,
+    vesting_program_account: AccountId,
+    number_of_schedules: u8,
+    // This flag decides wether the instruction will be executed with inputs that should
+    // not provoke any errors. (The accounts and contracts will be set up before if needed)
+    correct_inputs: bool,
 }
+
+/// Use u8 as an account id to simplify the address space and re-use accounts
+/// more often.
+type AccountId = u8;
 
 // ----------------------------------------------------------------------------- fuzz main
 
 fn main() {
+    let rt = tokio::runtime::Runtime::new().unwrap();
+
+    let token_vesting_testenv = TokenVestingEnv {
+        system_program_id: system_program::id(),
+        token_program_id: spl_token::id(),
+        clock_program_id: sysvar::clock::id(),
+        rent_program_id: sysvar::rent::id(),
+        vesting_program_id: Pubkey::from_str("SoLi39YzAM2zEXcecy77VGbxLB5yHryNckY9Jx7yBKM")
+            .unwrap(),
+        mint_authority_keypair: Keypair::new(),
+    };
+
     loop {
-        fuzz!(|fuzz_instruction: FuzzInstruction| {
-            // println!("amount is: {}", fuzz_instruction.amount);
-            // assert!(fuzz_instruction.amount > 10000);
-            let rt = tokio::runtime::Runtime::new().unwrap();
-            rt.block_on(async { test_init_create_unlock_flow().await })
+        // the fuzzer can generate any number of instructions - 0, 1, 2, more...
+        fuzz!(|fuzz_instructions: Vec<FuzzInstruction>| {
+            println!("ix are: {:?}", fuzz_instructions);
+            // if fuzz_instructions.len() >= 2 {
+            //     panic!();
+            // }
+
+            let mut program_test = ProgramTest::new(
+                "rebuild_rs",
+                token_vesting_testenv.vesting_program_id,
+                processor!(Processor::process_instruction),
+            );
+
+            program_test.add_account(
+                token_vesting_testenv.mint_authority_keypair.pubkey(),
+                Account {
+                    lamports: u32::MAX as u64,
+                    ..Account::default()
+                },
+            );
+
+            let mut test_state = rt.block_on(program_test.start_with_context());
+
+            rt.block_on(run_fuzz_instructions(
+                &token_vesting_testenv,
+                &mut test_state.banks_client,
+                test_state.payer,
+                test_state.last_blockhash,
+                fuzz_instructions,
+            ));
         });
     }
 }
 
-// ----------------------------------------------------------------------------- helpers
+async fn run_fuzz_instructions(
+    token_vesting_testenv: &TokenVestingEnv,
+    banks_client: &mut BanksClient,
+    correct_payer: Keypair,
+    recent_blockhash: Hash,
+    fuzz_instructions: Vec<FuzzInstruction>,
+) {
+    // the reason we need a HashMap is because the fuzzer is generating u8 values - and we need Pubkeys/Keypairs
+    // so we have to convert u8s -> into pubkeys/keypairs and store them
+    let mut vesting_account_keys: HashMap<AccountId, Pubkey> = HashMap::new();
+    let mut vesting_token_account_keys: HashMap<AccountId, Pubkey> = HashMap::new();
+    let mut source_token_account_owner_keys: HashMap<AccountId, Keypair> = HashMap::new();
+    let mut destination_token_owner_keys: HashMap<AccountId, Keypair> = HashMap::new();
+    let mut destination_token_keys: HashMap<AccountId, Pubkey> = HashMap::new();
+    let mut new_destination_token_keys: HashMap<AccountId, Pubkey> = HashMap::new();
+    let mut mint_keys: HashMap<AccountId, Keypair> = HashMap::new();
+    let mut payer_keys: HashMap<AccountId, Keypair> = HashMap::new();
 
-async fn setup_test_env() -> (BanksClient, Keypair, Hash, Pubkey) {
-    let program_id = Pubkey::from_str("SoLi39YzAM2zEXcecy77VGbxLB5yHryNckY9Jx7yBKM").unwrap();
-    let (mut banks_client, payer, recent_blockhash) = ProgramTest::new(
-        "rebuild_rs", //must match crate name or cargo test-bpf won't work
-        program_id,
-        processor!(Processor::process_instruction),
-    )
-    .start()
-    .await;
+    let mut global_output_ixs = vec![];
+    let mut global_signer_keys = vec![];
 
-    (banks_client, payer, recent_blockhash, program_id)
+    for ix in fuzz_instructions {
+        vesting_account_keys
+            .entry(ix.vesting_account_key)
+            .or_insert_with(|| Pubkey::new_unique());
+        vesting_token_account_keys
+            .entry(ix.vesting_token_account_key)
+            .or_insert_with(|| Pubkey::new_unique());
+        source_token_account_owner_keys
+            .entry(ix.source_token_account_owner_key)
+            .or_insert_with(|| Keypair::new());
+        destination_token_owner_keys
+            .entry(ix.destination_token_owner_key)
+            .or_insert_with(|| Keypair::new());
+        destination_token_keys
+            .entry(ix.destination_token_key)
+            .or_insert_with(|| Pubkey::new_unique());
+        new_destination_token_keys
+            .entry(ix.new_destination_token_key)
+            .or_insert_with(|| Pubkey::new_unique());
+        mint_keys
+            .entry(ix.mint_key)
+            .or_insert_with(|| Keypair::new());
+        payer_keys
+            .entry(ix.payer_key)
+            .or_insert_with(|| Keypair::new()); //this will be empty, no sol in it
+
+        let (mut output_ix, mut signer_keys) = run_fuzz_ix(
+            &token_vesting_testenv,
+            &ix,
+            &correct_payer,
+            mint_keys.get(&ix.mint_key).unwrap(),
+            vesting_account_keys.get(&ix.vesting_account_key).unwrap(),
+            vesting_token_account_keys
+                .get(&ix.vesting_token_account_key)
+                .unwrap(),
+            source_token_account_owner_keys
+                .get(&ix.source_token_account_owner_key)
+                .unwrap(),
+            destination_token_owner_keys
+                .get(&ix.destination_token_owner_key)
+                .unwrap(),
+            destination_token_keys
+                .get(&ix.destination_token_key)
+                .unwrap(),
+            new_destination_token_keys
+                .get(&ix.new_destination_token_key)
+                .unwrap(),
+            payer_keys.get(&ix.payer_key).unwrap(),
+        );
+        global_output_ixs.append(&mut output_ix);
+        global_signer_keys.append(&mut signer_keys);
+    }
+
+    let mut tx = Transaction::new_with_payer(&global_output_ixs, Some(&correct_payer.pubkey()));
+    let signers = [&correct_payer]
+        .iter()
+        .map(|&v| v) //needed to deref &Keypair
+        .chain(global_signer_keys.iter())
+        .collect::<Vec<&Keypair>>();
+    tx.partial_sign(&signers, recent_blockhash);
+    banks_client
+        .process_transaction(tx)
+        .await
+        .unwrap_or_else(|e| {
+            if let TransportError::TransactionError(te) = e {
+                match te {
+                    TransactionError::InstructionError(_, ie) => match ie {
+                        InstructionError::InvalidArgument
+                        | InstructionError::InvalidInstructionData
+                        | InstructionError::InvalidAccountData
+                        | InstructionError::InsufficientFunds
+                        | InstructionError::AccountAlreadyInitialized
+                        | InstructionError::InvalidSeeds
+                        | InstructionError::Custom(0) => {}
+                        _ => {
+                            print!("{:?}", ie);
+                            Err(ie).unwrap()
+                        }
+                    },
+                    TransactionError::SignatureFailure
+                    | TransactionError::InvalidAccountForFee
+                    | TransactionError::InsufficientFundsForFee => {}
+                    _ => {
+                        print!("{:?}", te);
+                        panic!()
+                    }
+                }
+            } else {
+                print!("{:?}", e);
+                panic!()
+            }
+        });
 }
 
-// #[tokio::test]
-async fn test_empty_ix() {
-    let (mut banks_client, payer, recent_blockhash, program_id) = setup_test_env().await;
+fn run_fuzz_ix(
+    token_vesting_testenv: &TokenVestingEnv,
+    ix: &FuzzInstruction,
+    correct_payer: &Keypair,
+    mint_key: &Keypair,
+    vesting_account_key: &Pubkey,
+    vesting_token_account_key: &Pubkey,
+    source_token_account_owner_key: &Keypair,
+    destination_token_owner_key: &Keypair,
+    destination_token_key: &Pubkey,
+    new_destination_token_key: &Pubkey,
+    payer_key: &Keypair,
+) -> (Vec<Instruction>, Vec<Keypair>) {
+    // basically, depending on the boolean generated by the fuzzer, we can decide to try to run an tx with correct inputs or with wrong inputs
+    if ix.correct_inputs {
+        //if we decide to run a correct tx, we first need to fix some inputs
+        //we use the seeds to derive a real PDA account, and then update the seeds to it captures the bump
+        let mut correct_seeds = ix.seeds;
+        let (correct_vesting_account_key, bump) = Pubkey::find_program_address(
+            &[&correct_seeds[..31]], //take 31 out of 32 bytes to generate the bump
+            &token_vesting_testenv.vesting_program_id,
+        );
+        correct_seeds[31] = bump; //assign that bump as 32nd byte into the array. now this array represents the entire seed used to derive the vesting account
+                                  // from vesting account generate vesting token account
+        let correct_vesting_token_key =
+            get_associated_token_address(&correct_vesting_account_key, &mint_key.pubkey());
+        // also separately generate the source token account
+        let correct_source_token_account_key = get_associated_token_address(
+            &source_token_account_owner_key.pubkey(),
+            &mint_key.pubkey(),
+        );
 
-    // ----------------------------------------------------------------------------- 1a manual
-    // let z = vec![4_u8, 4, 0, 0, 0];
-    // let mut tx = Transaction::new_with_payer(
-    //     &[Instruction::new_with_bytes(program_id, &z2, vec![])],
-    //     Some(&payer.pubkey()),
-    // );
+        // only then we proceed with matching, with correct inputs
 
-    // ----------------------------------------------------------------------------- 1a semi-manual
+        match ix {
+            // -----------------------------------------------------------------------------
+            FuzzInstruction {
+                instruction: VestingInstruction::Init { .. },
+                ..
+            } => {
+                let init_ix = init(
+                    &token_vesting_testenv.system_program_id,
+                    &token_vesting_testenv.rent_program_id,
+                    &token_vesting_testenv.vesting_program_id,
+                    &correct_payer.pubkey(), //correct in a sense that it's the payer account generated for us by the test program and so it actually has sol in it
+                    &correct_vesting_account_key,
+                    correct_seeds,
+                    ix.number_of_schedules as u32,
+                ).unwrap();
+                let ix_vec = vec![init_ix];
+                let kp_vec = vec![];
+                return (ix_vec, kp_vec);
+            }
+            // -----------------------------------------------------------------------------
+            FuzzInstruction {
+                instruction: VestingInstruction::Create { ..},
+                ..
+            } => {
+                let init_ix = init(
+                    &token_vesting_testenv.system_program_id,
+                    &token_vesting_testenv.rent_program_id,
+                    &token_vesting_testenv.vesting_program_id,
+                    &correct_payer.pubkey(), //correct in a sense that it's the payer account generated for us by the test program and so it actually has sol in it
+                    &correct_vesting_account_key,
+                    correct_seeds,
+                    ix.number_of_schedules as u32,
+                ).unwrap();
+                let mut create_instructions = create_fuzzinstruction(
+                        token_vesting_testenv,
+                        ix,
+                        correct_payer,
+                        &correct_source_token_account_key,
+                        source_token_account_owner_key,
+                        destination_token_key,
+                        &destination_token_owner_key.pubkey(),
+                        &correct_vesting_account_key,
+                        &correct_vesting_token_key,
+                        correct_seeds,
+                        mint_key,
+                        ix.source_token_amount);
+                let mut ix_vec = vec![init_ix];
+                ix_vec.append(&mut create_instructions);
+                let kp_vec = vec![
+                        clone_keypair(mint_key),
+                        clone_keypair(&token_vesting_testenv.mint_authority_keypair),
+                        clone_keypair(source_token_account_owner_key)];
+                return (ix_vec, kp_vec);
+            }
+            // -----------------------------------------------------------------------------
+            // unlock = basically everything in create + unlock() on top
+            // -----------------------------------------------------------------------------
+            // change also nothing new, not doing
+            // -----------------------------------------------------------------------------
+            FuzzInstruction {
+                instruction: VestingInstruction::Empty { .. }, // ignore what's the actual argument passed into init - we don't care at this stage
+                .. //ignore all the other fields in the struct - so we're only matching on one
+            } => {
+                let empty_ix = prepare_dummy_empty_ix(token_vesting_testenv.vesting_program_id);
+                let ix_vec = vec![empty_ix];
+                let kp_vec = vec![];
+                return (ix_vec, kp_vec);
+            }
+            _ => {
+                return (vec![], vec![]);
+            }
+        }
+    //otherwise, if we don't want a correc tx, we go ahead with existing inputs
+    //why do this? because we're actually catching these errors in unwrap_or_else() above, and printing them out instead of panicking
+    //the only times we panic is when we get UNEXPECTED erros. that's why this is powerful.
+    } else {
+        match ix {
+            FuzzInstruction {
+                instruction: VestingInstruction::Init { .. },
+                ..
+            } => {
+                let init_ix = init(
+                    &token_vesting_testenv.system_program_id,
+                    &token_vesting_testenv.rent_program_id,
+                    &token_vesting_testenv.vesting_program_id,
+                    &payer_key.pubkey(), //we're using a pubkey with no sol in the address
+                    vesting_account_key, //we're using a vesting account that wasn't actually derived from the vesting program - and so one of the checks in the contract will fail
+                    ix.seeds,
+                    ix.number_of_schedules as u32,
+                )
+                .unwrap();
+                let ix_vec = vec![init_ix];
+                let kp_vec = vec![];
+                return (ix_vec, kp_vec);
+            }
+            _ => {
+                return (vec![], vec![]);
+            }
+        }
+    }
+}
+
+fn prepare_dummy_empty_ix(program_id: Pubkey) -> Instruction {
     let mut z = vec![4_u8];
     let x = 32_u32.to_le_bytes();
     z.extend(&x);
-    let mut tx = Transaction::new_with_payer(
-        &[Instruction::new_with_bytes(program_id, &z, vec![])],
-        Some(&payer.pubkey()),
-    );
-
-    // ----------------------------------------------------------------------------- 2 automatic - bincode
-    // requires deserialization with bincode on the other side
-
-    // let mut tx = Transaction::new_with_payer(
-    //     &[Instruction::new_with_bincode(
-    //         program_id,
-    //         &VestingInstruction::Empty { number: 5 },
-    //         vec![],
-    //     )],
-    //     Some(&payer.pubkey()),
-    // );
-
-    // ----------------------------------------------------------------------------- 3 automatic - borsh
-    // (!) requires deserialization with borsh on the other side
-
-    // let mut tx = Transaction::new_with_payer(
-    //     &[Instruction::new_with_borsh(
-    //         program_id,
-    //         &VestingInstruction::Empty { number: 5 },
-    //         vec![],
-    //     )],
-    //     Some(&payer.pubkey()),
-    // );
-
-    tx.sign(&[&payer], recent_blockhash);
-    banks_client.process_transaction(tx).await.unwrap();
+    Instruction::new_with_bytes(program_id, &z, vec![])
 }
 
-// #[tokio::test]
-async fn test_init_create_unlock_flow() {
-    let (mut banks_client, payer, recent_blockhash, program_id) = setup_test_env().await;
-
-    // ----------------------------------------------------------------------------- 1 call init
-
-    // LOL I packed the data here manually, but actually there wasn't any need for this - I could have just used pub fn init() from instruction.rs
-    let mut data = vec![0_u8];
-    let num_schedules = 1_u32.to_le_bytes();
-    data.extend(&*SEED[..32].as_bytes());
-    data.extend(&num_schedules);
-
-    let vesting_account_key =
-        Pubkey::create_program_address(&[&SEED[..32].as_bytes()], &program_id).unwrap();
-
-    let mut tx = Transaction::new_with_payer(
-        &[Instruction::new_with_bytes(
-            program_id,
-            &data,
-            vec![
-                //   0. `[]` The system program account
-                AccountMeta::new_readonly(system_program::id(), false),
-                //   1. `[]` The sysvar Rent account
-                AccountMeta::new_readonly(sysvar::rent::id(), false),
-                //   1. `[signer]` The fee payer account
-                AccountMeta::new_readonly(payer.pubkey(), true),
-                //   1. `[writable]` The vesting account
-                AccountMeta::new(vesting_account_key, false),
-            ],
-        )],
-        Some(&payer.pubkey()),
+// A correct vesting create fuzz instruction
+fn create_fuzzinstruction(
+    token_vesting_testenv: &TokenVestingEnv,
+    fuzz_instruction: &FuzzInstruction,
+    payer: &Keypair,
+    correct_source_token_account_key: &Pubkey,
+    source_token_account_owner_key: &Keypair,
+    destination_token_key: &Pubkey,
+    destination_token_owner_key: &Pubkey,
+    correct_vesting_account_key: &Pubkey,
+    correct_vesting_token_key: &Pubkey,
+    correct_seeds: [u8; 32],
+    mint_key: &Keypair,
+    source_amount: u64,
+) -> Vec<Instruction> {
+    // Initialize the token mint account
+    let mut instructions_acc = mint_init_instruction(
+        &payer,
+        &mint_key,
+        &token_vesting_testenv.mint_authority_keypair,
     );
 
-    tx.sign(&[&payer], recent_blockhash);
-    //in a sense this .unwrap() is the first assert!()
-    //if there was any error while executing the contract, this would also throw an error
-    banks_client.process_transaction(tx).await.unwrap();
-
-    // ----------------------------------------------------------------------------- 2 interm step - create assoc token acc
-
-    // step 1 - we need to create a new token. We can't use existing because the payer, which is randomly derived in this test, needs to have the right to mint tokens
-    // 1.1 we'll need a new keypair
-    let mint_keypair = solana_sdk::signature::Keypair::new();
-
-    // 1.2 so that we can create a new account
-    let rent = banks_client.get_rent().await.unwrap();
-    let mint_rent = rent.minimum_balance(spl_token::state::Mint::LEN);
-    let create_account_ix = create_account(
+    // Create the associated token accounts
+    let source_instruction = create_associated_token_account(
         &payer.pubkey(),
-        &mint_keypair.pubkey(),
-        mint_rent,
-        spl_token::state::Mint::LEN as u64,
-        &spl_token::id(), //we're making the spl_token the owner
+        &source_token_account_owner_key.pubkey(),
+        &mint_key.pubkey(),
     );
+    instructions_acc.push(source_instruction);
 
-    // 1.3 which we will initialize as token mint account
-    let init_token_mint_acc_ix = spl_token::instruction::initialize_mint(
+    let vesting_instruction = create_associated_token_account(
+        &payer.pubkey(),
+        &correct_vesting_account_key,
+        &mint_key.pubkey(),
+    );
+    instructions_acc.push(vesting_instruction);
+
+    let destination_instruction = create_associated_token_account(
+        &payer.pubkey(),
+        &destination_token_owner_key,
+        &mint_key.pubkey(),
+    );
+    instructions_acc.push(destination_instruction);
+
+    // Credit the source account
+    let setup_instruction = mint_to(
         &spl_token::id(),
-        &mint_keypair.pubkey(),
-        &payer.pubkey(),
-        Some(&payer.pubkey()),
-        0,
+        &mint_key.pubkey(),
+        &correct_source_token_account_key,
+        &token_vesting_testenv.mint_authority_keypair.pubkey(),
+        &[],
+        source_amount,
     )
     .unwrap();
+    instructions_acc.push(setup_instruction);
 
-    let mut create_token_tx = Transaction::new_signed_with_payer(
-        &[create_account_ix, init_token_mint_acc_ix],
-        Some(&payer.pubkey()),
-        &[&payer, &mint_keypair], //&[&b"escrow"[..], &[bump_seed]]
-        recent_blockhash,
+    let used_number_of_schedules = fuzz_instruction.number_of_schedules.min(
+        fuzz_instruction
+            .schedules
+            .len()
+            .try_into()
+            .unwrap_or(u8::MAX),
     );
-    banks_client
-        .process_transaction(create_token_tx)
-        .await
-        .unwrap();
+    // Initialize the vesting program account
+    let create_instruction = create(
+        &token_vesting_testenv.vesting_program_id,
+        &token_vesting_testenv.token_program_id,
+        &correct_vesting_account_key,
+        &correct_vesting_token_key,
+        &source_token_account_owner_key.pubkey(),
+        &correct_source_token_account_key,
+        &destination_token_key,
+        &mint_key.pubkey(),
+        fuzz_instruction.schedules.clone()[..used_number_of_schedules.into()].into(),
+        correct_seeds,
+    )
+    .unwrap();
+    instructions_acc.push(create_instruction);
 
-    // step 2 - create an associated token account
-    // this consists of 2 sub-steps:
-    // step 2.1: we find the associated address, because we're going to pass it in - https://docs.rs/spl-associated-token-account/1.0.2/spl_associated_token_account/fn.get_associated_token_address.html
-    // - note that the wallet address is the vesting_account, because we want the vesting_token_account to be owned by the vesting_account
+    return instructions_acc;
+}
 
-    let vesting_token_account_key = spl_associated_token_account::get_associated_token_address(
-        &vesting_account_key,
-        &mint_keypair.pubkey(),
-    );
-
-    // step 2.2: we issue a call to create that address to the associated token program - https://docs.rs/spl-associated-token-account/1.0.2/spl_associated_token_account/fn.create_associated_token_account.html
-    // - note that the program only has 1 instruction, which is why we don't need to send any data. we only need to pass in the right accounts
-    let accounts = vec![
-        //   pubkey: payer, isSigner, isWritable
-        AccountMeta::new(payer.pubkey(), true),
-        //   pubkey: vesting_token_account, isWritable
-        AccountMeta::new(vesting_token_account_key, false),
-        //   pubkey: vesting_account,
-        AccountMeta::new_readonly(vesting_account_key, false),
-        //   pubkey: splTokenMintAddress,
-        AccountMeta::new_readonly(mint_keypair.pubkey(), false),
-        //   pubkey: systemProgramId,
-        AccountMeta::new_readonly(system_program::id(), false),
-        //   pubkey: TOKEN_PROGRAM_ID,
-        AccountMeta::new_readonly(spl_token::id(), false),
-        //   pubkey: SYSVAR_RENT_PUBKEY,
-        AccountMeta::new_readonly(sysvar::rent::id(), false),
+// Helper functions
+fn mint_init_instruction(
+    payer: &Keypair,
+    mint: &Keypair,
+    mint_authority: &Keypair,
+) -> Vec<Instruction> {
+    let instructions = vec![
+        system_instruction::create_account(
+            &payer.pubkey(),
+            &mint.pubkey(),
+            Rent::default().minimum_balance(82),
+            82,
+            &spl_token::id(),
+        ),
+        initialize_mint(
+            &spl_token::id(),
+            &mint.pubkey(),
+            &mint_authority.pubkey(),
+            None,
+            0,
+        )
+        .unwrap(),
     ];
+    return instructions;
+}
 
-    let mut token_tx = Transaction::new_with_payer(
-        &[Instruction::new_with_bytes(
-            spl_associated_token_account::id(),
-            &[], //no data because this program only executes 1 instruction
-            accounts,
-        )],
-        Some(&payer.pubkey()),
-    );
-
-    // (!) COULD HAVE JUST USED THE BELOW, BUT WOULD STILL NEED TO RUN "GET" AS WE NEED THE ADDR FURTHER
-    // let ix_to_create_assoc_acc = spl_associated_token_account::create_associated_token_account(
-    //     &payer.pubkey(),
-    //     &vesting_account_key,
-    //     &mint_keypair.pubkey(),
-    // );
-    //
-    // println!("ix is: {:?}", ix_to_create_assoc_acc);
-
-    // let mut token_tx =
-    //     Transaction::new_with_payer(&[ix_to_create_assoc_acc], Some(&payer.pubkey()));
-
-    token_tx.sign(&[&payer], recent_blockhash);
-    banks_client.process_transaction(token_tx).await.unwrap();
-
-    // ----------------------------------------------------------------------------- 3 create source & mint some tokens
-
-    // create an associated token account from main payer's account
-    let create_source_token_acc_ix = spl_associated_token_account::create_associated_token_account(
-        &payer.pubkey(),
-        &payer.pubkey(),
-        &mint_keypair.pubkey(),
-    );
-
-    // get the key so that we can use it minter ix below
-    let source_token_acc_key = spl_associated_token_account::get_associated_token_address(
-        &payer.pubkey(),
-        &mint_keypair.pubkey(),
-    );
-
-    //note how this time we're using a helper function instead of manually building up the tx data
-    let mint_to_source_acc_ix = spl_token::instruction::mint_to(
-        &spl_token::id(),
-        &mint_keypair.pubkey(),
-        &source_token_acc_key,
-        &payer.pubkey(),
-        &[&payer.pubkey()],
-        1000,
-    )
-    .unwrap();
-
-    let mint_tx = Transaction::new_signed_with_payer(
-        &[create_source_token_acc_ix, mint_to_source_acc_ix],
-        Some(&payer.pubkey()),
-        &[&payer],
-        recent_blockhash,
-    );
-    banks_client.process_transaction(mint_tx).await.unwrap();
-
-    // ----------------------------------------------------------------------------- 4 create dest & call create
-
-    let dest_keypair = solana_sdk::signature::Keypair::new();
-
-    // let create_dest_acc_ix = solana_program::system_instruction::create_account(
-    //     &dest_keypair
-    // )
-
-    let create_dest_token_acc_ix = spl_associated_token_account::create_associated_token_account(
-        &payer.pubkey(),
-        &dest_keypair.pubkey(),
-        &mint_keypair.pubkey(),
-    );
-
-    let dest_token_acc_key = spl_associated_token_account::get_associated_token_address(
-        &dest_keypair.pubkey(),
-        &mint_keypair.pubkey(),
-    );
-
-    let s = rebuild_rs::instruction::Schedule {
-        release_time: 1,
-        amount: 111,
-    };
-    let schedules = vec![s];
-
-    // try_into() instead of into() because forcing an arb-sized array into a fixed size might fail
-    // https://users.rust-lang.org/t/why-from-u8-is-not-implemented-for-u8-x/35590
-    let seeds: [u8; 32] = (&*SEED[..32].as_bytes()).try_into().unwrap();
-
-    let create_vesting_contract_ix = create(
-        &program_id,
-        &spl_token::id(),
-        &vesting_account_key,
-        &vesting_token_account_key,
-        &payer.pubkey(),
-        &source_token_acc_key,
-        &dest_token_acc_key,
-        &mint_keypair.pubkey(),
-        schedules,
-        seeds,
-    )
-    .unwrap();
-
-    let tx = Transaction::new_signed_with_payer(
-        &[create_dest_token_acc_ix, create_vesting_contract_ix],
-        Some(&payer.pubkey()),
-        &[&payer],
-        recent_blockhash,
-    );
-    banks_client.process_transaction(tx).await.unwrap();
-
-    // ----------------------------------------------------------------------------- 5 test unlock
-
-    let unlock_contract_ix = unlock(
-        &program_id,
-        &spl_token::id(),
-        &sysvar::clock::id(),
-        &vesting_account_key,
-        &vesting_token_account_key,
-        &dest_token_acc_key,
-        seeds,
-    )
-    .unwrap();
-
-    let tx = Transaction::new_signed_with_payer(
-        &[unlock_contract_ix],
-        Some(&payer.pubkey()),
-        &[&payer],
-        recent_blockhash,
-    );
-    banks_client.process_transaction(tx).await.unwrap();
-
-    // ----------------------------------------------------------------------------- verify state on the blockchain
-
-    // let client = solana_client::rpc_client::RpcClient::new("http://localhost:8899".into());
-    // let dest_acc = client.get_account(&dest_token_acc_key).unwrap();
-
-    let dest_acc = banks_client
-        .get_account(dest_token_acc_key)
-        .await
-        .unwrap()
-        .unwrap();
-    let dest_token_acc_state = spl_token::state::Account::unpack(&dest_acc.data.borrow()).unwrap();
-    assert_eq!(dest_token_acc_state.amount, 111);
-
-    let source_acc = banks_client
-        .get_account(source_token_acc_key)
-        .await
-        .unwrap()
-        .unwrap();
-    let source_token_acc_state =
-        spl_token::state::Account::unpack_from_slice(&source_acc.data).unwrap();
-    assert_eq!(source_token_acc_state.amount, 1000 - 111);
-
-    println!("it workerd");
+fn clone_keypair(keypair: &Keypair) -> Keypair {
+    return Keypair::from_bytes(&keypair.to_bytes().clone()).unwrap();
 }

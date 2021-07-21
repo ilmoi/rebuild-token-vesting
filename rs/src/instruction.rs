@@ -85,6 +85,7 @@ pub const SCHEDULE_SIZE: usize = 16;
 // #[derive(Clone, Debug, PartialEq, BorshSerialize, BorshDeserialize)]
 // #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[derive(Clone, Debug, PartialEq)]
+#[cfg_attr(feature = "fuzz", derive(arbitrary::Arbitrary))]
 pub struct Schedule {
     pub release_time: u64, //in SECONDS, not milliseconds
     pub amount: u64,
@@ -233,7 +234,7 @@ impl VestingInstruction {
     }
 }
 
-// ----------------------------------------------------------------------------- just copied the below, it's pretty straightforward
+// ----------------------------------------------------------------------------- helper fns to be called from tests / other rust code
 
 // Creates a `Init` instruction
 pub fn init(
@@ -343,6 +344,47 @@ pub fn change_destination(
         data,
     })
 }
+
+// ----------------------------------------------------------------------------- needed for fuzzing
+
+#[cfg(feature = "fuzz")]
+impl arbitrary::Arbitrary<'_> for VestingInstruction {
+    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
+        let seeds: [u8; 32] = u.arbitrary()?;
+        let choice = u.choose(&[0, 1, 2, 3, 4])?;
+        match choice {
+            0 => {
+                let number_of_schedules = u.arbitrary()?;
+                return Ok(Self::Init {
+                    seeds,
+                    number_of_schedules,
+                });
+            }
+            _ => {
+                let schedules: [Schedule; 10] = u.arbitrary()?;
+                let key_bytes: [u8; 32] = u.arbitrary()?;
+                let token_mint_addr: Pubkey = Pubkey::new(&key_bytes);
+                let key_bytes: [u8; 32] = u.arbitrary()?;
+                let token_dest_addr: Pubkey = Pubkey::new(&key_bytes);
+                return Ok(Self::Create {
+                    seeds,
+                    token_mint_addr,
+                    token_dest_addr,
+                    schedules: schedules.to_vec(),
+                });
+            } // todo didn't bother implementing..
+              // 2 => return Ok(Self::Unlock { seeds }),
+              // 3 => return Ok(Self::ChangeDestination { seeds }),
+              // _ => {
+              //     return Ok(Self::Empty {
+              //         number: u.arbitrary()?,
+              //     })
+              // }
+        }
+    }
+}
+
+// ----------------------------------------------------------------------------- test
 
 #[cfg(test)]
 mod test {
