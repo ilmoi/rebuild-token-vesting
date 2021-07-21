@@ -197,7 +197,7 @@ impl VestingInstruction {
     pub fn pack(&self) -> Vec<u8> {
         let mut buf = Vec::with_capacity(size_of::<Self>());
         match self {
-            Self::Empty { number } => return vec![0],
+            Self::Empty { number: _ } => return vec![0],
             &Self::Init {
                 seeds,
                 number_of_schedules,
